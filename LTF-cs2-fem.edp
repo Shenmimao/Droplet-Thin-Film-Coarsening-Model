@@ -1,0 +1,160 @@
+load "MUMPS_mpi"
+include "ffmatlib.idp"
+real varepsilon=0.08,A0=1,A=1;\\numerical scheme parameters 
+real x0=0.,x1=1,y0=0.,y1=1; \\domain
+real T=600; \\ Termination Time
+real ns=128.;
+real toll=1e-6;
+real h=(x1-x0)/ns;
+
+real dt=0.000002;\\time step
+real t;
+real st=dt/10.;
+real gt=0.;
+int ktol=20;
+real ftime=dt*100.;//T-2.*dt;// for save data
+
+\\ Spatial Discretization and Define the Finite Element Space
+mesh Th=square(ns,ns,[x0+(x1-x0)*x,y0+(y1-y0)*y]);
+fespace Vh(Th,P1,periodic=[[2,y],[4,y],[1,x],[3,x]]);
+Vh phioold=2.+1./(2*pi)*sin(2.*pi*x)*cos(2.*pi*y); \\Initial Data
+//Vh phioold=2+0.1*(2.*randreal1()-1);
+Vh muoold=-3./8.*(phioold^(-9)-phioold^(-3))-varepsilon^2*(dxx(phioold)+dyy(phioold));
+
+savemesh(Th,"LTFMesh.msh");
+ffSaveVh(Th,Vh,"LTFFespace.txt");
+ffSaveData(phioold,"t="+t+"matlab-phioold-solution.txt");
+
+macro grad(u,v)((dx(u)*dx(v)+dy(u)*dy(v)))//
+
+Vh phiold,muold,phik,muk,phinew,munew,phitemp,mutemp;
+Vh phi1temp,mu1temp,phi1k,mu1k,vh,wh;
+
+problem problem1([phi1temp,mu1temp],[vh,wh])=int2d(Th,qft=qf1pTlump,mpirank)(phi1temp*vh+mu1temp*wh-(24.*(phik)^(-10)-8.*phik^(-4)+8./3*A0)*phi1temp*wh)
+                                           +int2d(Th,mpirank)(st*(grad(mu1temp,vh))-varepsilon^2*(grad(phi1temp,wh)))
+                                           +int2d(Th,qft=qf1pTlump,mpirank)(phik*vh-phi1k*vh+muk*wh-(-8./3*phik^(-9)+8./3*phik^(-3)+8./3*A0*phik)*wh+8./3*A0*phi1k*wh)
+                                           +int2d(Th,mpirank)(st*(grad(muk,vh))-varepsilon^2*(grad(phik,wh)));	
+problem problem2([phitemp,mutemp],[vh,wh])=int2d(Th,qft=qf1pTlump,mpirank)(3.*phitemp*vh+mutemp*wh-(24.*(phik)^(-10)-8.*phik^(-4)+8./3*A0)*phitemp*wh)
+                                           +int2d(Th,mpirank)(2.*dt*(grad(mutemp,vh))-varepsilon^2*(grad(phitemp,wh))-A*dt*(grad(phitemp,wh)))
+                                           +int2d(Th,qft=qf1pTlump,mpirank)((3.*phik-4.*phiold+phioold)*vh+muk*wh-(-8./3*phik^(-9)+8./3*phik^(-3)+8./3*A0*phik)*wh+8./3*A0*(2.*phiold-phioold)*wh)
+                                           +int2d(Th,mpirank)(2.*dt*(grad(muk,vh))-varepsilon^2*(grad(phik,wh))-A*dt*(grad(phik,wh)-grad(phiold,wh)));
+
+Vh u1,u2;
+varf lap(u1,u2)=int2d(Th,qft=qf1pTlump)(-dx(u1)*dx(u2)-dy(u1)*dy(u2));
+matrix ilap=lap(Vh,Vh,solver=CG);
+ofstream fileE("Energydata-FH-CH-n="+ns+"-T="+T+"-dt="+dt+".txt");
+
+fileE.fixed.precision(10);
+fileE<<"x="<<x1<<","<<"ns="<<ns<<","<<"T="<<T<<","<<"dt="<<dt<<","<<"varepsilon="<<varepsilon<<","<<"A0="<<A0<<","<<"A="<<A<<endl;
+fileE<<"t"<<","<<"energy"<<","<<"Mass"<<","<<"phi_max"<<","<<"phi_min"<<","<<"CPUtimes"<<endl;
+
+real Maxphi=phioold[].max;
+real Minphi=phioold[].min;
+real mass=int2d(Th)(phioold);
+real energy=int2d(Th)(1./3*phioold^(-8)-4./3*phioold^(-2)+varepsilon^2/2.*(dx(phioold)^2+dy(phioold)^2));
+fileE<<gt<<","<<energy<<","<<mass<<","<<Maxphi<<","<<Minphi<<","<<0.<<endl;
+cout<<"t="<<gt<<","<<"energy="<<energy<<","<<"Mass="<<mass<<","<<"phi_max="<<Maxphi<<","<<"phi_min="<<Minphi<<","<<"CPUtimes"<<0.<<endl;
+
+plot(phioold,fill=1,cmm="time="+t,value=1);
+
+phi1k=phioold;
+mu1k=muoold;
+phik=phi1k;
+muk=mu1k;
+real cpu=clock();
+real cpu1=clock();
+
+\\ Solve the 1-Order Convex Splitting Fully Discrete Scheme Using the Newton Iteration Method
+for(t=gt+st;t<dt+0.001*st;t=t+st)
+{
+  for(int k=1;k<ktol;k++)
+  {
+    problem1;
+    phinew=phik+phi1temp;
+    munew=muk+mu1temp;
+
+    phik=phinew;
+    muk=munew;
+
+    real res;
+    res=phi1temp[].l2+mu1temp[].l2;
+    cout<<"k="<<k<<endl;
+    if(res<toll) break;
+  }
+  real tt=clock()-cpu1;
+  phi1k=phinew;
+  mu1k=munew;
+  phik=phi1k;
+  muk=mu1k;
+
+ plot(phi1k,fill=1,cmm="time="+t,value=1);
+}
+real tt=clock()-cpu1;
+
+phiold=phi1k;
+muold=mu1k;
+cout<<"********"<<"t="<<t-st<<"**********"<<endl;
+Maxphi=phiold[].max;
+Minphi=phiold[].min;
+mass=int2d(Th)(phiold);
+energy=int2d(Th)(1./3*phiold^(-8)-4./3*phiold^(-2)+varepsilon^2/2.*(dx(phiold)^2+dy(phiold)^2));
+fileE<<t-st<<","<<energy<<","<<mass<<","<<Maxphi<<","<<Minphi<<","<<tt<<endl;
+cout<<"t="<<t-st<<","<<"energy="<<energy<<","<<"Mass="<<mass<<","<<"phi_max="<<Maxphi<<","<<"phi_min="<<Minphi<<","<<"CPUtimes"<<tt<<endl;
+
+phik=2.*phiold-phioold;
+muk=2.*muold-muoold;
+
+\\ Solve the BDF2 Convex Splitting Fully Discrete Scheme Using the Newton Iteration Method
+for(t=t-st+dt;t<T+0.001*dt;t=t+dt)
+{
+  real cpu1=clock();
+  for(int k=1;k<ktol;k++)
+  {
+    problem2;
+    phinew=phik+phitemp;
+    munew=muk+mutemp;
+
+    phik=phinew;
+    muk=munew;
+    real res;
+    res=phitemp[].l2+mutemp[].l2;
+    cout<<"k="<<k<<endl;
+    if(res<toll) break;
+  }
+  real tt=clock()-cpu1;
+  phioold=phiold;
+  muoold=muold;
+  phiold=phinew;
+  muold=munew;
+  phik=2.*phiold-phioold;
+  muk=2.*muold-muoold;
+
+ plot(phiold,fill=1,cmm="phioldtime="+t,value=1);
+ Maxphi=phiold[].max;
+ Minphi=phiold[].min;
+ mass=int2d(Th)(phiold);
+ Vh phima,phimb;
+ phima[]=phiold[]-phioold[];
+ phimb[]=ilap^-1*phima[];
+ real phims=phima[]'*phimb[];
+ energy=int2d(Th,qft=qf1pTlump)(1./3*phiold^(-8)-4./3*phiold^(-2))
+           +int2d(Th)(varepsilon^2/2.*(dx(phiold)^2+dy(phiold)^2)+4./3.*A0*phima^2)+1./(4.*dt)*phims;
+  fileE<<t<<","<<energy<<","<<mass<<","<<Maxphi<<","<<Minphi<<","<<tt<<endl;
+  cout<<"t="<<t<<","<<"energy="<<energy<<","<<"Mass="<<mass<<","<<"phi_max="<<Maxphi<<","<<"phi_min="<<Minphi<<","<<"CPUtimes"<<tt<<endl;
+
+  if(t==ftime)
+ { cout<<"ftime="<<ftime<<endl;
+
+ //********************matlab type*********************
+  ffSaveData(phiold,"N="+ns+"-tao="+dt+"-t="+t+"-u1.txt");
+ftime=ftime+dt*100;
+//*****************************************************
+}
+}
+cout<< "CPU-time = " << clock() - cpu <<endl;
+cout<<"********************************************************************************************************************"<<endl;
+cout<<"*******varepsilon="<<varepsilon<<"*******A0="<<A0<<"*******A="<<A<<"**************"<<endl;
+cout<<"*******x1="<<x1<<"*******ns="<<ns<<"*******dt="<<dt<<"*******T="<<T<<"**************"<<endl;
+cout<<"********************************************************************************************************************"<<endl;
+
+
